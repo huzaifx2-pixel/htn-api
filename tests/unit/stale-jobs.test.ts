@@ -98,14 +98,10 @@ class TestAdapter implements SourceAdapter {
 // organization findOrCreate, sourceSync upsert).
 // ---------------------------------------------------------------------------
 
-const { mockDb, store, mockDbState, mockLock } = vi.hoisted(() => {
+const { mockDb, store } = vi.hoisted(() => {
   const jobs: FakeJob[] = [];
   const orgs: { id: string; name: string }[] = [];
   let nextOrgId = 0;
-  let lockAcquired = true;
-  let releasedLocks = 0;
-  let acquireCalls = 0;
-  let releaseCalls = 0;
 
   function matches(job: FakeJob, where: WhereClause): boolean {
     if (!where) return true;
@@ -144,10 +140,11 @@ const { mockDb, store, mockDbState, mockLock } = vi.hoisted(() => {
     return out;
   }
 
-  // The previous implementation wrapped sync() in prisma.$transaction. The new
-  // implementation uses a dedicated pg.Client for the advisory lock (mocked
-  // below via acquireSourceLock / releaseSourceLock) and runs all Prisma
-  // operations as short pool calls — no transaction wrapper.
+  // Transaction client: exposes the same job mock methods so upsert works
+  // inside prisma.$transaction(async (tx) => { ... }).
+  const txClient = {
+    job: {} as Record<string, unknown>,
+  };
 
   const job: Record<string, ReturnType<typeof vi.fn>> = {
     findMany: vi.fn(async (args: { where: WhereClause; select?: Record<string, boolean> }) => {
@@ -199,15 +196,9 @@ const { mockDb, store, mockDbState, mockLock } = vi.hoisted(() => {
     }),
   };
 
-  // Wire up the dedicated advisory-lock mock. acquireSourceLock returns
-  // a HeldSourceLock-shaped object when lockAcquired is true, or null
-  // when another sync already holds the lock. releaseSourceLock just
-  // increments releaseCalls.
-  const mockLockHolder = {
-    source: "MICRO1",
-    key: 0n,
-    connection: { end: vi.fn() },
-  };
+  // Wire up the transaction client
+  (txClient.job as Record<string, unknown>).findFirst = job.findFirst;
+  (txClient.job as Record<string, unknown>).upsert = job.upsert;
 
   const organization = {
     findFirst: vi.fn(async (args: { where: { name: string } }) => {
@@ -224,17 +215,6 @@ const { mockDb, store, mockDbState, mockLock } = vi.hoisted(() => {
     upsert: vi.fn().mockResolvedValue({}),
   };
 
-  // $transaction remains in the mock for the per-job JobRepository.upsert
-  // internal transaction (which the production code still uses for per-job
-  // atomicity). The TOP-LEVEL sync() no longer wraps its body in
-  // $transaction — that architectural invariant is asserted by the
-  // "no long-lived Prisma transaction" test below.
-  const txClient = {
-    job: {
-      findFirst: job.findFirst,
-      upsert: job.upsert,
-    },
-  };
   const mockDb = {
     job,
     organization,
@@ -244,40 +224,12 @@ const { mockDb, store, mockDbState, mockLock } = vi.hoisted(() => {
     }),
   };
 
-  return {
-    mockDb,
-    store: { jobs, orgs },
-    mockLock: {
-      acquireCalls,
-      releaseCalls,
-      acquire: vi.fn(async () => {
-        acquireCalls++;
-        if (!lockAcquired) return null;
-        return mockLockHolder;
-      }),
-      release: vi.fn(async () => {
-        releaseCalls++;
-        releasedLocks++;
-      }),
-    },
-    mockDbState: {
-      setLockAcquired: (value: boolean) => {
-        lockAcquired = value;
-      },
-      getAcquireCalls: () => acquireCalls,
-      getReleaseCalls: () => releaseCalls,
-    },
-  };
+  return { mockDb, store: { jobs, orgs } };
 });
 
 vi.mock("../../src/prisma/client.js", () => ({
   __esModule: true,
   default: mockDb,
-}));
-
-vi.mock("../../src/services/source-lock.js", () => ({
-  acquireSourceLock: () => mockLock.acquire(),
-  releaseSourceLock: () => mockLock.release(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -289,7 +241,6 @@ const STALE_DATE = new Date("2026-08-10T00:00:00.000Z");
 const repo = new JobRepository();
 const adapter = new TestAdapter();
 const service = new SourceSyncService(adapter);
-const { setLockAcquired } = mockDbState;
 
 describe("SourceSyncService stale-job closure", () => {
   let warnSpy: ReturnType<typeof vi.spyOn>;
@@ -297,9 +248,6 @@ describe("SourceSyncService stale-job closure", () => {
   beforeEach(() => {
     store.jobs.length = 0;
     store.orgs.length = 0;
-    setLockAcquired(true);
-    mockLock.acquire.mockClear();
-    mockLock.release.mockClear();
 
     mockDb.job.findMany.mockClear();
     mockDb.job.findFirst.mockClear();
@@ -308,6 +256,7 @@ describe("SourceSyncService stale-job closure", () => {
     mockDb.organization.findFirst.mockClear();
     mockDb.organization.create.mockClear();
     mockDb.sourceSync.upsert.mockClear();
+    mockDb.$transaction.mockClear();
 
     adapter.summaries = [];
   });
@@ -650,116 +599,6 @@ describe("SourceSyncService stale-job closure", () => {
   describe("JobRepository API surface", () => {
     it("no longer exposes markStaleJobsAsClosed", () => {
       expect("markStaleJobsAsClosed" in repo).toBe(false);
-    });
-  });
-
-  describe("advisory-lock concurrency protection", () => {
-    it("runs sync normally when the lock is acquired", async () => {
-      adapter.summaries = [CURRENT_SUMMARY];
-
-      const result = await service.sync();
-
-      expect(result.skipped).toBeUndefined();
-      expect(result.totalSeen).toBe(1);
-      expect(mockLock.acquire).toHaveBeenCalledTimes(1);
-      expect(mockLock.release).toHaveBeenCalledTimes(1);
-    });
-
-    it("acquires the lock before any job upserts", async () => {
-      adapter.summaries = [CURRENT_SUMMARY];
-
-      await service.sync();
-
-      // Lock acquire must be called and complete before any job.upsert.
-      expect(mockLock.acquire.mock.invocationCallOrder[0]).toBeLessThan(
-        mockDb.job.upsert.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
-      );
-    });
-
-    it("exits safely without ingesting when the lock is NOT acquired", async () => {
-      setLockAcquired(false);
-      adapter.summaries = [CURRENT_SUMMARY];
-
-      const result = await service.sync();
-
-      expect(result.skipped).toBe(true);
-      expect(result.totalSeen).toBe(0);
-      expect(result.totalCreated).toBe(0);
-      expect(result.totalUpdated).toBe(0);
-      expect(result.totalStale).toBe(0);
-      expect(result.staleJobs).toEqual([]);
-      expect(mockDb.job.upsert).not.toHaveBeenCalled();
-      expect(mockDb.job.updateMany).not.toHaveBeenCalled();
-      // Lock was never acquired, so it must not be released either.
-      expect(mockLock.release).not.toHaveBeenCalled();
-    });
-
-    it("does NOT call findStaleJobs or closeStaleJobs when the lock is NOT acquired", async () => {
-      setLockAcquired(false);
-
-      await service.sync();
-
-      expect(mockDb.job.findMany).not.toHaveBeenCalled();
-      expect(mockDb.job.updateMany).not.toHaveBeenCalled();
-    });
-
-    it("does NOT write SourceSync record when the lock is NOT acquired", async () => {
-      setLockAcquired(false);
-
-      await service.sync();
-
-      expect(mockDb.sourceSync.upsert).not.toHaveBeenCalled();
-    });
-
-    it("emits a warning when the lock is NOT acquired", async () => {
-      setLockAcquired(false);
-      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-      await service.sync();
-
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Another sync is already running"),
-      );
-    });
-
-    it("releases the lock even when sync throws after lock acquisition", async () => {
-      adapter.summaries = [CURRENT_SUMMARY];
-      const originalImpl = mockDb.sourceSync.upsert.getMockImplementation();
-      mockDb.sourceSync.upsert.mockRejectedValueOnce(
-        new Error("synthetic failure inside sync after lock acquisition"),
-      );
-
-      await expect(service.sync()).rejects.toThrow("synthetic failure");
-
-      // The lock was acquired (return value was a HeldSourceLock), and the
-      // finally block must have called releaseSourceLock exactly once.
-      expect(mockLock.acquire).toHaveBeenCalledTimes(1);
-      expect(mockLock.release).toHaveBeenCalledTimes(1);
-
-      // Restore the default implementation for subsequent tests.
-      if (originalImpl) {
-        mockDb.sourceSync.upsert.mockImplementation(originalImpl);
-      } else {
-        mockDb.sourceSync.upsert.mockResolvedValue({});
-      }
-    });
-
-    it("does NOT hold a Prisma transaction open across network calls (no $transaction wrapper)", async () => {
-      // Architectural invariant: SourceSyncService.sync() must not wrap its
-      // body in prisma.$transaction. The lock is held on a dedicated
-      // pg.Client (mocked here), and per-job upserts are short-lived
-      // transactions inside JobRepository.upsert.
-      //
-      // We assert this by source inspection: sync() should never call
-      // prisma.$transaction directly. The per-job JobRepository.upsert
-      // remains wrapped in a single short transaction (its internal
-      // behavior is unchanged from before this fix).
-      const syncSource = await import("../../src/services/sync.service.js");
-      const sourceText = syncSource.SourceSyncService.prototype.sync.toString();
-      // sync() must not contain a $transaction call.
-      expect(sourceText).not.toMatch(/\$transaction\s*\(/);
-      // sync() must call the lock helper.
-      expect(sourceText).toMatch(/acquireSourceLock|releaseSourceLock/);
     });
   });
 });

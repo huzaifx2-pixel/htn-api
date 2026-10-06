@@ -30,10 +30,7 @@ export class Micro1Parser {
   ): Micro1JobDetailDTO {
 
     const cleaned = this.htmlCleaner.clean(schema.description);
-
-console.dir(cleaned, { depth: null });
-
-const content = this.sectionExtractor.extract(cleaned.html);
+    const content = this.sectionExtractor.extract(cleaned.html);
 
     return {
       source: "micro1",

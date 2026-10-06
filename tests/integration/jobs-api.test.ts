@@ -203,17 +203,42 @@ suite("Jobs API — ACTIVE status filtering", () => {
         externalId: `test-detail-${Date.now()}`,
         source: JobSource.MICRO1,
         title: "Detail Test Job",
+        description: "A detailed description",
         organization: { connect: { id: orgId } },
         status: JobStatus.ACTIVE,
+        openings: 3,
+        salaryMin: 50,
+        salaryMax: 70,
+        salaryCurrency: "USD",
+        applyUrl:
+          "https://jobs.micro1.ai/post/detail?referralCode=abc",
+        metadata: { payRatePeriod: "hourly" },
       },
     });
     createdJobIds.push(job.id);
+
+    const skill = await prisma.skill.upsert({
+      where: { name: `skill-${job.externalId}` },
+      create: { name: `skill-${job.externalId}` },
+      update: {},
+    });
+    await prisma.jobSkill.create({
+      data: { jobId: job.id, skillId: skill.id },
+    });
 
     const result = await getJobById(job.externalId);
 
     expect(result).not.toBeNull();
     expect(result!.jobId).toBe(job.externalId);
     expect(result!.title).toBe("Detail Test Job");
+    expect(result!.client).toBe("Test Org for Jobs API");
+    expect(result!.company).toBe("Test Org for Jobs API");
+    expect(result!.description).toBe("A detailed description");
+    expect(result!.openings).toBe(3);
+    expect(result!.pay).toBe("$50-$70/hr");
+    expect(result!.referralLink).toContain("referralCode=abc");
+    expect(result!.applyUrl).toContain("referralCode=abc");
+    expect(result!.skills).toEqual([`skill-${job.externalId}`]);
   });
 
   it("existing job detail endpoint returns CLOSED jobs (detail not filtered by status)", async () => {

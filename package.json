@@ -1,7 +1,7 @@
 {
   "name": "htn-api",
   "version": "1.0.0",
-  "description": "HTN Extractor API",
+    "description": "Micro1 referral job import API",
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
@@ -14,7 +14,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "sync:micro1": "tsx src/scripts/sync-micro1.ts"
+    "sync:micro1": "tsx src/scripts/sync-micro1.ts",
+    "sync:request-otp": "tsx src/scripts/request-micro1-otp.ts",
+    "sync:verify-otp": "tsx src/scripts/verify-micro1-otp.ts"
   },
   "keywords": [],
   "author": "",

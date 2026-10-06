@@ -14,6 +14,7 @@ export class Micro1Processor {
     const html = await this.client.fetch(url);
 
     const dto = this.parser.parse(html);
+    dto.canonicalUrl = dto.canonicalUrl ?? url;
 
     return this.mapper.map(dto);
   }

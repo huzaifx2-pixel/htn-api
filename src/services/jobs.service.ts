@@ -16,6 +16,8 @@ export interface JobFilters {
     posted?: number;
     sort?: "newest" | "oldest";
     status?: JobStatus;
+    /** ats = careers/website; all = ATS ingest from API; micro1 = referral ingest only */
+    origin?: "ats" | "micro1" | "all";
 }
 
 export interface JobSearchResult {
@@ -45,6 +47,8 @@ export async function getJobs(
     page = 1,
     limit = 20
 ): Promise<JobSearchResult> {
+    const origin = filters.origin ?? "ats";
+
     const { jobs: prismaJobs, total } = await jobRepository.findMany({
         search: filters.search,
         company: filters.company,
@@ -57,6 +61,7 @@ export async function getJobs(
         page,
         limit,
         status: filters.status ?? JobStatus.ACTIVE,
+        origin,
     });
 
     const totalPages = Math.ceil(total / limit);

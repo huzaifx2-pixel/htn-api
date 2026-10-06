@@ -1,13 +1,8 @@
-import { JobSource, JobStatus } from "@prisma/client";
+import { JobSource, JobStatus, type SourceSync } from "@prisma/client";
 import prisma from "../prisma/client.js";
 import { JobRepository } from "../repositories/job.repository.js";
 import { OrganizationRepository } from "../repositories/organization.repository.js";
-import type { SourceAdapter } from "../adapters/source.adapter.js";
-import {
-  acquireSourceLock,
-  releaseSourceLock,
-  type HeldSourceLock,
-} from "./source-lock.js";
+import type { SourceAdapter, SourceJobSummary } from "../adapters/source.adapter.js";
 
 export interface SyncResult {
   source: JobSource;
@@ -19,7 +14,6 @@ export interface SyncResult {
   totalFailed: number;
   totalStale: number;
   staleJobs: { id: string; externalId: string | null }[];
-  skipped?: boolean;
 }
 
 function floorToSeconds(date: Date): Date {
@@ -42,39 +36,6 @@ export class SourceSyncService {
 
     console.log(`[${this.adapter.source}] Starting sync at ${syncStart.toISOString()}`);
 
-    const connectionString = process.env.DATABASE_URL ?? "";
-    const lock = await acquireSourceLock(this.adapter.source, connectionString);
-
-    if (lock === null) {
-      console.warn(
-        `[${this.adapter.source}] Another sync is already running for this source — skipping to avoid concurrent ingestion`,
-      );
-      const syncEnd = new Date();
-      return {
-        source: this.adapter.source,
-        syncStart,
-        syncEnd,
-        totalSeen: 0,
-        totalCreated: 0,
-        totalUpdated: 0,
-        totalFailed: 0,
-        totalStale: 0,
-        staleJobs: [],
-        skipped: true,
-      };
-    }
-
-    try {
-      return await this.runSync(syncStart, limit);
-    } finally {
-      await releaseSourceLock(lock);
-    }
-  }
-
-  private async runSync(syncStart: Date, limit?: number): Promise<SyncResult> {
-    // Network fetching happens OUTSIDE any Prisma transaction. The
-    // session-scoped advisory lock acquired in sync() is held on a
-    // dedicated pg.Client and is independent of the Prisma pool.
     const summaries = await this.adapter.getJobSummaries(syncStart);
     console.log(`[${this.adapter.source}] Found ${summaries.length} job summaries in source feed`);
 
@@ -97,8 +58,6 @@ export class SourceSyncService {
         });
 
         const upsertData = this.adapter.mapToUpsertData(job, orgId, syncStart);
-        // Each upsert is its own short transaction inside JobRepository.upsert.
-        // No long-lived Prisma transaction is held across the loop.
         const result = await this.jobRepository.upsert(upsertData);
 
         if (result === "created") {
@@ -114,16 +73,7 @@ export class SourceSyncService {
 
     const syncEnd = new Date();
 
-    // Short standalone write for SourceSync bookkeeping. Uses the normal
-    // Prisma pool — no outer transaction is held during this call.
-    await this.upsertSourceSyncRecord(
-      syncStart,
-      syncEnd,
-      toProcess.length,
-      created,
-      updated,
-      failed,
-    );
+    await this.upsertSourceSyncRecord(syncStart, syncEnd, toProcess.length, created, updated, failed);
 
     let staleJobs: { id: string; externalId: string | null }[] = [];
 
@@ -132,15 +82,7 @@ export class SourceSyncService {
         `[${this.adapter.source}] Source returned 0 jobs — skipping stale-closure to avoid data loss`,
       );
     } else {
-      const cutoff = floorToSeconds(syncStart);
-      // Short standalone reads + write. No outer transaction is held.
-      staleJobs = await prisma.job.findMany({
-        where: {
-          source: this.adapter.source,
-          lastSeenAt: { lt: cutoff },
-        },
-        select: { id: true, externalId: true },
-      });
+      staleJobs = await this.jobRepository.findStaleJobs(this.adapter.source, syncStart);
       console.log(`[${this.adapter.source}] Stale jobs (not seen in this cycle): ${staleJobs.length}`);
 
       const staleClosedCount = await this.closeStaleJobs(this.adapter.source, syncStart);
@@ -216,6 +158,3 @@ export class SourceSyncService {
     });
   }
 }
-
-// Re-export for tests
-export type { HeldSourceLock };

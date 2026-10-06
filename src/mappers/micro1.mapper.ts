@@ -4,10 +4,6 @@ import { HTNJob, ScreeningQuestion } from "../models/htn-job.model.js";
 
 export class Micro1Mapper {
   public map(dto: Micro1JobDetailDTO): HTNJob {
-    console.log(dto.content);
-    console.log("CONTENT IN MAPPER");
-    console.dir(dto.content, { depth: null });
-    
     return {
       id: this.createId(dto),
 

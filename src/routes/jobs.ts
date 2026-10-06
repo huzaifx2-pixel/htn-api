@@ -66,6 +66,9 @@ router.get("/", async (req, res) => {
                             req.query.sort === "oldest"
                                 ? "oldest"
                                 : "newest",
+
+                    // Public careers/website feed: ATS-published only (not Micro1 ingest).
+                    origin: "ats",
                 };
                 
                 const result = await getJobs(filters, page, limit);

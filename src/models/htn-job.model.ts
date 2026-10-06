@@ -42,7 +42,8 @@ export interface HTNJob {
         max?: number;
       };
     
-      yearly?: number;
+      /** Micro1 sometimes sends a number, sometimes `{ min, max }`. */
+      yearly?: number | { min?: number; max?: number };
     
       referralReward?: number;
     };

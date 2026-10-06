@@ -1,29 +1,40 @@
 export interface Job {
-    jobId: string;
+  /** External / ATS job id shown on careers */
+  jobId: string;
 
-    title: string;
+  /** Client / company name (ATS "Client" column) */
+  client: string;
 
-    company: string;
+  /** Alias of client for older consumers */
+  company: string;
 
-    description: string;
+  title: string;
 
-    employmentType: string | null;
+  /** Job description (ATS "Job Description" column) */
+  description: string;
 
-    locationType: string | null;
+  /** Number of openings */
+  openings: number;
 
-    postedDate: string | null;
+  /** Required skills */
+  skills: string[];
 
-    applyUrl: string;
+  /** Formatted pay string, e.g. "$40–$60/hr" */
+  pay: string;
 
-    source: string;
+  /** Referral apply URL with referralCode (ATS "Referral Link") */
+  referralLink: string;
 
-    responsibilities: string;
+  /** Alias of referralLink for older consumers */
+  applyUrl: string;
 
-    requirements: string;
-
-    preferredQualifications: string;
-
-    skills: string[];
-
-    remote: boolean;
+  /** Careers detail fields (headsbaseinc.com job page) */
+  employmentType?: string | null;
+  locationType?: string | null;
+  postedDate?: string | null;
+  responsibilities?: string;
+  requirements?: string;
+  preferredQualifications?: string;
+  remote?: boolean | null;
+  source?: string;
 }

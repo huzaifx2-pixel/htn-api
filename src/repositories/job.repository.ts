@@ -28,6 +28,13 @@ export interface JobQueryParams {
   page?: number;
   limit?: number;
   status?: JobStatus;
+  /**
+   * Pipeline audience:
+   * - ats: careers/website feed (published from ATS)
+   * - micro1: Micro1 referral ingest only
+   * - all: both (ATS import of API inventory)
+   */
+  origin?: "ats" | "micro1" | "all";
 }
 
 export interface JobUpsertData {
@@ -54,6 +61,7 @@ export interface JobUpsertData {
   salaryMin?: number | null;
   salaryMax?: number | null;
   salaryCurrency?: string | null;
+  openings?: number | null;
   location?: string | null;
   country?: string | null;
   lastSeenAt?: Date | null;
@@ -93,13 +101,13 @@ const JOB_SOURCE_MAP: Record<string, JobSource> = {
   OTHER: JobSource.OTHER,
 };
 
-function toEmploymentType(value: string | undefined): EmploymentType | undefined {
+export function toEmploymentType(value: string | undefined): EmploymentType | undefined {
   if (!value) return undefined;
   const normalized = value.toUpperCase().replace(/[-\s]/g, "_");
   return EMPLOYMENT_TYPE_MAP[normalized];
 }
 
-function toWorkplaceType(value: string | undefined): WorkplaceType | undefined {
+export function toWorkplaceType(value: string | undefined): WorkplaceType | undefined {
   if (!value) return undefined;
   const normalized = value.toUpperCase().replace(/[-\s]/g, "_");
   return WORKPLACE_TYPE_MAP[normalized];
@@ -191,6 +199,7 @@ export class JobRepository {
           salaryMin: data.salaryMin,
           salaryMax: data.salaryMax,
           salaryCurrency: data.salaryCurrency,
+          openings: data.openings ?? 1,
           location: data.location,
           country: data.country,
           lastSeenAt: data.lastSeenAt,
@@ -217,10 +226,12 @@ export class JobRepository {
           salaryMin: data.salaryMin,
           salaryMax: data.salaryMax,
           salaryCurrency: data.salaryCurrency,
+          openings: data.openings ?? 1,
           location: data.location,
           country: data.country,
           lastSeenAt: data.lastSeenAt,
           lastSyncedAt: data.lastSyncedAt,
+          metadata: data.metadata === undefined ? undefined : data.metadata ?? {},
         },
       });
 
@@ -351,6 +362,53 @@ export class JobRepository {
 
     if (params.status) {
       where.status = { equals: params.status };
+    }
+
+    if (params.origin === "ats" || params.origin === "micro1") {
+      const originClause: Prisma.JobWhereInput =
+        params.origin === "ats"
+          ? {
+              OR: [
+                { metadata: { path: ["origin"], equals: "ats" } },
+                { metadata: { path: ["integration"], equals: "HTN_ATS" } },
+              ],
+            }
+          : {
+              OR: [
+                { metadata: { path: ["origin"], equals: "micro1" } },
+                {
+                  AND: [
+                    {
+                      NOT: {
+                        metadata: { path: ["origin"], equals: "ats" },
+                      },
+                    },
+                    {
+                      NOT: {
+                        metadata: {
+                          path: ["integration"],
+                          equals: "HTN_ATS",
+                        },
+                      },
+                    },
+                  ],
+                },
+              ],
+            };
+
+      const andParts: Prisma.JobWhereInput[] = [];
+      if (where.OR) {
+        andParts.push({ OR: where.OR });
+        delete where.OR;
+      }
+      if (where.AND) {
+        andParts.push(
+          ...(Array.isArray(where.AND) ? where.AND : [where.AND]),
+        );
+        delete where.AND;
+      }
+      andParts.push(originClause);
+      where.AND = andParts;
     }
 
     return where;
